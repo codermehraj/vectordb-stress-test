@@ -14,6 +14,8 @@ import time
 import numpy as np
 from transformers import AutoTokenizer, AutoModel
 import torch
+import pymupdf
+import logging
 # import json
 
 app = Flask(__name__)
@@ -22,7 +24,7 @@ weaviate_client = None
 
 weaviate_host = os.getenv("WEAVIATE_URL", "localhost")
 pg_host = os.getenv("PG_URL", "localhost")
-
+logging.basicConfig(level=logging.INFO)
 
 try:
     weaviate_client = weaviate.connect_to_local(host=weaviate_host)
@@ -49,20 +51,7 @@ except Exception as e:
     if "Collection already exists" in str(e):
         weviate_collection = weaviate_client.collections.get(name="DocumentSearch")
         print("Collection already exists")
-    # else:
-    #     raise e
-# finally:
-    # print("Collection:", weviate_collection)
-    # weaviate_client.close()
 
-
-# class_name = "DocumentSearch"
-# class_obj = {"class": class_name, "vectorizer": "none"}
-
-# # Check if the class already exists
-# existing_classes = weaviate_client.schema.get()["classes"]
-# if not any(cls["class"] == class_name for cls in existing_classes):
-#     weaviate_client.schema.create_class(class_obj)
 
 print("connectting to pg " , pg_host)
 
@@ -90,6 +79,27 @@ model = AutoModel.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
 
 # Define a projection matrix to transform the 384-dim embedding to 512-dim
 projection_matrix = np.random.rand(384, 512)
+
+try:
+    path = os.path.dirname(os.path.abspath(__file__))
+    upload_folder=os.path.join(
+    path.replace("/file_folder",""),"tmp")
+    os.makedirs(upload_folder, exist_ok=True)
+    app.config['uploads'] = upload_folder
+except Exception as e:
+    app.logger.info('An error occurred while creating temp folder')
+    app.logger.error('Exception occurred : {}'.format(e))
+
+def chunk_text(text, chunk_size):
+    words = text.split()  # Split the text into words
+    chunks = []
+    
+    for i in range(0, len(words), chunk_size):
+        # Get the chunk of words from index i to i + chunk_size
+        chunk = " ".join(words[i:i + chunk_size])
+        chunks.append(chunk)
+    
+    return chunks
 
 def generate_embedding(text):
     inputs = tokenizer(text, return_tensors='pt', max_length=512, truncation=True)
@@ -572,6 +582,441 @@ def search_embeddings_weviate():
     except Exception as e:        
         return jsonify({"error": str(e)}), 500
 
+########################## PDF PROCESS ENDPOINTS CHROMA ##########################
+@app.route('/upload/chroma', methods=['POST'])
+def upload_pdf_chroma():
+    """
+    API to upload a PDF document and extract embeddings using Chroma DB.
+    Expects a PDF file in the 'pdf' form-data field.
+    """
+    if 'pdf' not in request.files:
+        logging.error("No pdf given")
+        return jsonify({"error": "No pdf given"}), 400
+
+    file = request.files['pdf']
+
+    if file.filename == '':
+        logging.error("No selected file")
+        return jsonify({"error": "No selected file"}), 400
+
+    try:
+        # Save the PDF file to disk
+        logging.info("Uploading PDF file:" + file.filename)
+        
+        file_path = os.path.join(app.config.get('uploads') , file.filename)
+        file.save(file_path)
+        
+        # file_path = os.path.join("uploads", file.filename)
+        # file.save(file_path)
+        
+        logging.info("PDF uploaded successfully:" + file.filename)
+         
+        doc = pymupdf.open(file_path)
+
+        # Extract text from the PDF
+        full_text = ""
+        for page in doc: # iterate the document pages
+            text = page.get_text()
+            full_text += text
+        
+        # Log the full text extracted from the PDF
+        short_text = " ".join(full_text.split()[:20]) + "..."
+        logging.info("Full text extracted from PDF:")
+        logging.info(short_text)
+        
+        # Chunk the text into smaller parts
+        chunk_size = 50
+
+        chunks = chunk_text(text, chunk_size)
+        for i, chunk in enumerate(chunks):
+            short_text = str(i + 1) + ") ".join(chunk.split()[:10]) + "..."
+            logging.info("Embedding Chunk: ")
+            logging.info(short_text)
+
+            # Generate an embedding for the text
+            embedding = generate_embedding(chunk)
+            
+            embedding_id = str(uuid.uuid4())
+
+            # Add the embedding to Chroma DB
+            try:
+                collection.add(
+                    embeddings=[embedding],
+                    metadatas=[{
+                        "fileName": file.filename,
+                        "chunkNo": i + 1
+                    }],
+                    ids=[embedding_id],
+                    documents=[chunk]
+                )
+                logging.info("Embedding added successfully for the chunk")
+                # print(embedding)                
+            except Exception as e:
+                logging.error("ERROR WHILE STORING IN CHROMA => ", str(e))
+                return jsonify({"error": str(e)}), 500        
+        
+        return jsonify({"message": "PDF uploaded and embeddings extracted successfully"}), 201
+    
+    except Exception as e:
+        logging.error("ERROR WHILE STORING EMBEDDING FROM PDF => ", str(e))
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/search/chroma', methods=['POST'])
+def search_query_chroma():
+    """
+    API to search for the top N embeddings that match a given query embedding.
+    Expects a text in the 'query' form-data field.
+    """
+    
+    data = request.get_json()
+
+    if not data:
+        logging.error("Invalid JSON payload")
+        return jsonify({"error": "Invalid JSON payload"}), 400
+
+    query = data.get('query')
+    top_k = data.get('top_k', 2)  # Default to top 2 matches
+    
+    logging.info("Received query:" + query)  # Debug print statement
+    
+    if not query:
+        logging.error("Missing 'query' parameter")
+        return jsonify({"error": "Missing 'query' parameter"}), 400
+    
+    try:
+        # Generate an embedding for the query text
+        query_embedding = generate_embedding(query)
+        
+        logging.info("Generated embedding for query")  # Debug print statement
+        logging.info("Searching for similar embeddings in DB")  # Debug print statement
+        
+        # Perform a similarity search in Chroma DB
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=top_k,
+            include=['documents', 'metadatas']
+        )
+        
+        # print("Raw results from collection.query():", results)  # Debug print statement
+        logging.info("DB QUEERY SUCCESSFUL")  # Debug print statement
+
+        # Extract the results                
+        matched_metadatas = results['metadatas']
+        matched_documents = results['documents']
+        
+        # print("Matched metadatas:", matched_metadatas)  # Debug print statement
+
+        # Prepare response
+        data = []
+        for meta, doc in zip(matched_metadatas, matched_documents):
+            data.append({
+                "metadata": meta,
+                "document": doc  # Change this if documents are meant to be singular
+            })
+
+        return jsonify({"matches": data}), 200
+    
+    except Exception as e:
+        logging.error("ERROR WHILE SEARCHING IN CHROMA => ", str(e))
+        return jsonify({"error": str(e)}), 500
+    
+
+########################## PDF PROCESS ENDPOINTS PGVECTOR ##########################
+@app.route('/upload/pgvector', methods=['POST'])
+def upload_pdf_pgvector():
+    """
+    API to upload a PDF document and extract embeddings using pgvector DB.
+    Expects a PDF file in the 'pdf' form-data field.
+    """
+    if 'pdf' not in request.files:
+        logging.error("No pdf given")
+        return jsonify({"error": "No pdf given"}), 400
+
+    file = request.files['pdf']
+
+    if file.filename == '':
+        logging.error("No selected file")
+        return jsonify({"error": "No selected file"}), 400
+
+    try:
+        # Save the PDF file to disk
+        logging.info("Uploading PDF file:")
+        logging.info(file.filename)
+        
+        file_path = os.path.join(app.config.get('uploads') , file.filename)
+        file.save(file_path)
+        
+        # file_path = os.path.join("uploads", file.filename)
+        # file.save(file_path)
+        
+        logging.info("PDF uploaded successfully:")
+        
+        doc = pymupdf.open(file_path)
+
+        # Extract text from the PDF
+        full_text = ""
+        for page in doc: # iterate the document pages
+            text = page.get_text()
+            full_text += text
+        
+        short_text = " ".join(full_text.split()[:20]) + "..."
+        logging.info("Full text extracted from PDF:")
+        logging.info(short_text)
+        
+        # Chunk the text into smaller parts
+        chunk_size = 50
+
+        chunks = chunk_text(text, chunk_size)
+        for i, chunk in enumerate(chunks):
+            
+            short_text = str(i + 1) + ") ".join(chunk.split()[:10]) + "..."
+            logging.info("Embedding Chunk: ")
+            logging.info(short_text)
+
+            # Generate an embedding for the text
+            embedding = generate_embedding(chunk)
+            
+            # embedding_id = str(uuid.uuid4())
+
+            # Add the embedding to pgvector DB
+            try:
+                pg_cursor = pgvector_conn.cursor()
+        
+                # print embedding dimensions
+                print("Embedding dimensions: ", len(embedding))
+                
+                pg_cursor.execute(
+                        "INSERT INTO items (document, embedding, FileName, chunkNo) VALUES (%s, %s, %s, %s)",
+                        (chunk, embedding, file.filename, i + 1)
+                    )
+                
+                # pg_cursor.connection.commit()
+                pg_cursor.close()
+                
+                logging.info("Embedding added successfully for chunk")
+                                                
+                print(embedding)
+                return jsonify({"message": "Embedding added successfully"}), 201
+            except Exception as e:
+                logging.error("ERROR WHILE STORING IN PGVECTOR => ", str(e))
+                return jsonify({"error": str(e)}), 500    
+        
+        return jsonify({"message": "PDF uploaded and embeddings extracted successfully"}), 201
+    
+    except Exception as e:
+        logging.error("ERROR WHILE STORING EMBEDDING FROM PDF => ", str(e))
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/search/pgvector', methods=['POST'])
+def search_query_pgvector():
+    """
+    API to search for the top N embeddings that match a given query embedding.
+    Expects a text in the 'query' form-data field.
+    """
+    
+    data = request.get_json()
+
+    if not data:
+        logging.error("Invalid JSON payload")
+        return jsonify({"error": "Invalid JSON payload"}), 400
+
+    query = data.get('query')
+    top_k = data.get('top_k', 2)  # Default to top 2 matches
+    
+    logging.info("Received query:", query)  # Debug print statement
+    
+    if not query:
+        logging.error("Missing 'query' parameter")
+        return jsonify({"error": "Missing 'query' parameter"}), 400
+    
+    try:
+        # Generate an embedding for the query text
+        query_embedding = generate_embedding(query)
+        
+        logging.info("Generated embedding for query")  # Debug print statement
+        logging.info("Searching for similar embeddings in DB")  # Debug print statement
+        
+        pg_cursor = pgvector_conn.cursor()
+        
+        # Perform a cosine similarity search
+        pg_cursor.execute(
+            """SELECT id, document, FileName, chunkNo, 1 - (embedding <=> %s::vector) AS cosine_similarity
+               FROM items
+               ORDER BY cosine_similarity DESC LIMIT %s""",
+            (query_embedding, top_k)                    
+        )        
+        
+        results = []
+        
+        for row in pg_cursor.fetchall():
+            results.append({
+                "id": row[0],
+                "document": row[1],
+                "FileName": row[2],
+                "chunkNo": row[3],
+                "cosine_similarity": row[4]
+            })
+            print(f"ID: {row[0]}, CONTENT: {row[1]}, FileName: {row[2]}, chunkNo: {row[3]} - Cosine Similarity: {row[4]}")
+        
+        # print("Raw results from collection.query():", results)  # Debug print statement
+
+        # Extract the results                
+        # matched_metadatas = results['metadatas']
+        # matched_documents = results['documents']
+        
+        # print("Matched metadatas:", matched_metadatas)  # Debug print statement
+
+        # # Prepare response
+        # data = []
+        # for meta, doc in zip(matched_metadatas, matched_documents):
+        #     data.append({
+        #         "metadata": meta,
+        #         "document": doc  # Change this if documents are meant to be singular
+        #     })
+        
+        logging.info("DB QUEERY SUCCESSFUL")  # Debug print statement
+
+        return jsonify({"matches": results}), 200
+
+    except Exception as e:        
+        return jsonify({"error": str(e)}), 500
+    
+
+########################## PDF PROCESS ENDPOINTS WEVIATE ##########################
+@app.route('/upload/weviate', methods=['POST'])
+def upload_pdf_weviate():
+    """
+    API to upload a PDF document and extract embeddings using Weviate DB.
+    Expects a PDF file in the 'pdf' form-data field.
+    """
+    if 'pdf' not in request.files:
+        logging.error("No pdf given")
+        return jsonify({"error": "No pdf given"}), 400
+
+    file = request.files['pdf']
+
+    if file.filename == '':
+        logging.error("No selected file")
+        return jsonify({"error": "No selected file"}), 400
+
+    try:
+        # Save the PDF file to disk
+        logging.info("Uploading PDF file:")
+        logging.info(file.filename)
+        
+        file_path = os.path.join(app.config.get('uploads') , file.filename)
+        file.save(file_path)
+        
+        # file_path = os.path.join("uploads", file.filename)
+        # file.save(file_path)
+        
+        logging.info("PDF uploaded successfully")
+        
+        doc = pymupdf.open(file_path)
+
+        # Extract text from the PDF
+        full_text = ""
+        for page in doc: # iterate the document pages
+            text = page.get_text()
+            full_text += text
+            
+        short_text = " ".join(full_text.split()[:20]) + "..."
+        logging.info("Full text extracted from PDF:")
+        logging.info(short_text)
+        
+        # Chunk the text into smaller parts
+        chunk_size = 50
+
+        chunks = chunk_text(text, chunk_size)
+        for i, chunk in enumerate(chunks):
+            short_text = str(i + 1) + ") ".join(chunk.split()[:10]) + "..."
+            logging.info("Embedding Chunk: ")
+            logging.info(short_text)
+
+            # Generate an embedding for the text
+            embedding = generate_embedding(chunk)
+            
+            # embedding_id = str(uuid.uuid4())
+
+            # Add the embedding to Weviate DB
+            try:
+                weviate_collection = weaviate_client.collections.get(name="DocumentSearch")
+                weviate_collection.data.insert({"document": chunk, "fileName": file.filename, "chunkNo": i + 1}, vector=embedding)
+                
+                # with weaviate_client.batch as batch:
+                #     properties = {"document": document, "metadata": metadata}
+                #     batch.add_data_object(properties, "DocumentSearch", vector=embedding)
+                
+                logging.info("Embedding added successfully for chunk")
+                # print(embedding)                
+            except Exception as e:
+                logging.error("ERROR WHILE STORING IN WEVIATE => ", str(e))
+                return jsonify({"error": str(e)}), 500        
+        
+        return jsonify({"message": "PDF uploaded and embeddings extracted successfully"}), 201
+    
+    except Exception as e:
+        logging.error("ERROR WHILE STORING EMBEDDING FROM PDF => ", str(e))
+        return jsonify({"error": str(e)}), 500
+    
+@app.route('/search/weviate', methods=['POST'])
+def search_query_weviate():
+    """
+    API to search for the top N embeddings that match a given query embedding.
+    Expects a text in the 'query' form-data field.
+    """
+    
+    data = request.get_json()
+
+    if not data:
+        logging.error("Invalid JSON payload")
+        return jsonify({"error": "Invalid JSON payload"}), 400
+
+    query = data.get('query')
+    top_k = data.get('top_k', 2)
+    
+    logging.info("Received query:", query)  # Debug print statement
+    
+    if not query:
+        logging.error("Missing 'query' parameter")
+        return jsonify({"error": "Missing 'query' parameter"}), 400
+    
+    try:
+        # Generate an embedding for the query text
+        query_embedding = generate_embedding(query)
+        
+        logging.info("Generated embedding for query")  # Debug print statement
+        logging.info("Searching for similar embeddings in DB")  # Debug print statement
+        
+        # Perform a similarity search in Weviate DB
+        weviate_collection = weaviate_client.collections.get(name="DocumentSearch")
+        
+        result = weviate_collection.query.near_vector(
+            near_vector=query_embedding,
+            limit=top_k,
+            return_metadata=MetadataQuery(distance=True)
+        )
+        
+        results = []
+        
+        # print("QUERY RESULT -------------------------------")
+        for o in result.objects:
+            results.append({
+                "properties": o.properties,
+                "distance": o.metadata.distance
+            })
+            # print(o.properties)
+            # print(o.metadata.distance)
+        
+        logging.info("DB QUEERY SUCCESSFUL")  # Debug print statement
+        
+        return jsonify({"matches": results}), 200
+    
+    except Exception as e:
+        logging.error("ERROR WHILE SEARCHING IN WEVIATE => ", str(e))
+        return jsonify({"error": str(e)}), 500
+    
+
 
 @app.route('/')
 def index():
@@ -579,7 +1024,6 @@ def index():
 
 
 if __name__ == '__main__':
-    # Ensure the Chroma DB is persisted
     # Run the Flask app
     # print('weviate_is_ready:', weaviate_client.is_ready())
     app.run(host='0.0.0.0', port=5001, debug=True)

@@ -20,6 +20,7 @@ RUN pip install chromadb
 RUN pip install weaviate-client
 RUN pip install transformers
 RUN pip install torch
+RUN pip install pymupdf
 
 # RUN pip install -r requirements.txt
 
