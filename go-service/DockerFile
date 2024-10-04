@@ -1,0 +1,41 @@
+# Build Stage
+FROM golang:1.23.1-bullseye AS builder
+
+# Install any required dependencies (use apt-get for Debian-based images)
+RUN apt-get update && apt-get install -y git
+
+# Set the working directory inside the container
+WORKDIR /app
+
+# Copy the go.mod and go.sum files first for dependency installation
+COPY go.mod go.sum ./
+
+# Download Go modules
+RUN go mod download
+
+# Copy the source code to the container
+COPY . .
+
+# Build the Go binary with CGO disabled for static linking
+RUN CGO_ENABLED=0 GOOS=linux go build -o go-server .
+
+# Runtime Stage
+FROM alpine:latest
+
+# Install any necessary runtime libraries (if needed)
+RUN apk --no-cache add ca-certificates
+
+# Set the working directory in the smaller image
+WORKDIR /app
+
+# Copy the built binary from the builder stage
+COPY --from=builder /app/go-server .
+COPY --from=builder /app/embedding.py .
+
+# RUN apt-get install python3.6
+
+# Expose the port your Go service listens on
+EXPOSE 8081
+
+# Run the Go service binary
+CMD ["./go-server"]

@@ -1,0 +1,93 @@
+version: "3"
+
+services:
+  go-service:
+    build:
+      context: ./go-service
+      dockerfile: DockerFile
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./go-service/uploads:/app/uploads
+    networks:
+      - mynetwork   
+
+  # postgres:
+  #   image: pgvector/pgvector  # Use the official pgvector image
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - ./data:/var/lib/postgresql/data
+  #     - ./init_pgvector.sql:/docker-entrypoint-initdb.d/init_pgvector.sql
+  #   environment:
+  #     POSTGRES_USER: myuser
+  #     POSTGRES_PASSWORD: mypassword
+  #     POSTGRES_DB: mydb
+  #   networks:
+  #     - mynetwork
+
+  postgres:
+    build:
+      context: ./postgres  # Update this to point to the directory where the Dockerfile is located
+      dockerfile: DockerFile
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+      POSTGRES_DB: mydb
+    networks:
+      - mynetwork
+
+  weaviate:
+    command:
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8080'
+    - --scheme
+    - http
+    image: cr.weaviate.io/semitechnologies/weaviate:1.26.5
+    ports:
+    - 8080:8080
+    - 50051:50051
+    volumes:
+    - weaviate_data:/var/lib/weaviate
+    restart: on-failure:0
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: 'true'
+      PERSISTENCE_DATA_PATH: '/var/lib/weaviate'
+      DEFAULT_VECTORIZER_MODULE: 'none'
+      ENABLE_API_BASED_MODULES: 'true'
+      CLUSTER_HOSTNAME: 'node1'
+    networks:
+      - mynetwork
+
+  flask-service:
+    build:
+      context: ./flask-service      
+      dockerfile: DockerFile
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./flask-service:/test
+    networks:
+      - mynetwork
+    restart: always
+    environment:
+      - WEAVIATE_URL=weaviate
+      - PG_URL=postgres      
+    depends_on:
+      - postgres
+      - weaviate
+
+volumes:
+  weaviate_data:
+  flask-service:
+
+networks:
+  mynetwork:
+    driver: bridge

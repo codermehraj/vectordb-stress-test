@@ -1,0 +1,72 @@
+# # Use the official Postgres image as a base image
+# FROM postgres:latest
+
+# # Set environment variables for Postgres
+# ENV POSTGRES_USER=myuser
+# ENV POSTGRES_PASSWORD=mypassword
+# ENV POSTGRES_DB=mydb
+
+# # Install the build dependencies
+# USER root
+# RUN apt-get update && apt-get install -y \
+#     build-essential \
+#     git \
+#     postgresql-server-dev-all \
+#     && rm -rf /var/lib/apt/lists/*
+
+# # Clone, build, and install the pgvector extension
+# RUN cd /tmp \
+#     && git clone --branch v0.5.0 https://github.com/pgvector/pgvector.git \
+#     && cd pgvector \
+#     && make \
+#     && make install
+
+# Use the official PostgreSQL 15 image as the base
+# FROM postgres:17
+
+# # Install pgvector extension
+# RUN apt-get update 
+# # && apt-get install -y postgresql-17-vector
+
+# # Set environment variables for PostgreSQL user, password, and database
+# ENV POSTGRES_USER=myuser
+# ENV POSTGRES_PASSWORD=mypassword
+# ENV POSTGRES_DB=mydb
+
+# # Copy initialization SQL scripts (optional if you have any)
+# # Ensure the init_pgvector.sql script is in the same directory as the Dockerfile
+# COPY ./init_pgvector.sql /docker-entrypoint-initdb.d/
+
+# # Expose PostgreSQL port
+# EXPOSE 5432
+
+FROM postgres:17
+
+# Install dependencies for building pgvector
+RUN apt-get update && apt-get install -y \
+    git \
+    make \
+    gcc \
+    postgresql-server-dev-17
+
+# Clone the pgvector repository and install the extension
+RUN cd /tmp && \
+    git clone --branch v0.7.4 https://github.com/pgvector/pgvector.git && \
+    cd pgvector && \
+    make && \
+    make install
+
+# Set environment variables for PostgreSQL user, password, and database
+ENV POSTGRES_USER=myuser
+ENV POSTGRES_PASSWORD=mypassword
+ENV POSTGRES_DB=mydb
+
+# Copy initialization SQL scripts (optional if you have any)
+# Ensure the init_pgvector.sql script is in the same directory as the Dockerfile
+COPY ./init_pgvector.sql /docker-entrypoint-initdb.d/
+
+# Clean up the build environment to reduce the image size
+RUN rm -rf /tmp/pgvector && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Expose PostgreSQL port
+EXPOSE 5432

@@ -1,0 +1,177 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+
+	"github.com/go-resty/resty/v2"
+	"github.com/gorilla/mux"
+	"github.com/klippa-app/go-pdfium"
+	"github.com/klippa-app/go-pdfium/requests"
+	"github.com/klippa-app/go-pdfium/single_threaded"
+)
+
+var pool pdfium.Pool
+
+// Extract text from the PDF file
+func extractTextFromPDF(filePath *os.File) (string, error) {
+	pool = single_threaded.Init(single_threaded.Config{})
+	pdfiumInstance, err := pool.GetInstance(time.Second * 30)
+	if err != nil {
+		return "", err
+	}
+	defer pdfiumInstance.Close()
+
+	filePathStr := filePath.Name()
+	doc, err := pdfiumInstance.OpenDocument(&requests.OpenDocument{FilePath: &filePathStr})
+	if err != nil {
+		return "", err
+	}
+	defer pdfiumInstance.Close()
+
+	text := ""
+	fmt.Println(doc.Document)
+	// for i := 0; i < doc.GetPageCount(); i++ {
+	// 	page, err := doc.GetPageByIndex(i)
+	// 	if err != nil {
+	// 		return "", err
+	// 	}
+	// 	text += page.GetText()
+	// }
+	return text, nil
+}
+
+// Chunk the extracted text into smaller pieces
+func chunkText(text string, chunkSize int) []string {
+	words := strings.Split(text, " ")
+	var chunks []string
+	for i := 0; i < len(words); i += chunkSize {
+		end := i + chunkSize
+		if end > len(words) {
+			end = len(words)
+		}
+		chunks = append(chunks, strings.Join(words[i:end], " "))
+	}
+	return chunks
+}
+
+// Call the Python script to generate embeddings
+func generateEmbedding(text string) ([]float64, error) {
+	cmd := exec.Command("python3", "embedding.py", text)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	var embedding []float64
+	err = json.Unmarshal(output, &embedding)
+	if err != nil {
+		return nil, err
+	}
+	return embedding, nil
+}
+
+// Store the embeddings in Chroma DB
+func storeEmbeddingInChroma(id string, embedding []float64) error {
+	client := resty.New()
+
+	data := map[string]interface{}{
+		"documents": []map[string]interface{}{
+			{"id": id},
+		},
+		"embeddings": []interface{}{embedding},
+	}
+
+	resp, err := client.R().
+		SetHeader("Content-Type", "application/json").
+		SetBody(data).
+		Post("http://localhost:8000/collections/pdf_embeddings")
+
+	if err != nil {
+		return err
+	}
+
+	if resp.IsError() {
+		return fmt.Errorf("error response from Chroma DB: %s", resp.Status())
+	}
+	return nil
+}
+
+// Process the PDF: extract text, chunk it, generate embeddings, and store in Chroma DB
+func processPDF(filePath *os.File) error {
+	text, err := extractTextFromPDF(filePath)
+	fmt.Print(text)
+	if err != nil {
+		return fmt.Errorf("failed to extract text: %v", err)
+	}
+
+	// chunks := chunkText(text, 500)
+
+	// for i, chunk := range chunks {
+	// 	embedding, err := generateEmbedding(chunk)
+	// 	if err != nil {
+	// 		return fmt.Errorf("failed to generate embedding: %v", err)
+	// 	}
+
+	// 	err = storeEmbeddingInChroma(fmt.Sprintf("%s_chunk_%d", filePath, i), embedding)
+	// 	if err != nil {
+	// 		return fmt.Errorf("failed to store embedding: %v", err)
+	// 	}
+	// }
+
+	return nil
+}
+
+// Handler for the POST endpoint to upload PDF
+func uploadPDFHandler(w http.ResponseWriter, r *http.Request) {
+	// Parse the uploaded file
+	file, _, err := r.FormFile("pdf")
+	if err != nil {
+		http.Error(w, "Invalid file upload", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Create a temporary file
+	tempFile, err := os.CreateTemp("uploads", "*.pdf")
+	if err != nil {
+		http.Error(w, "Unable to create temp file", http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(tempFile.Name()) // Clean up the temp file later
+
+	// Write the uploaded content to the temp file
+	_, err = io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "Unable to read uploaded file", http.StatusInternalServerError)
+		return
+	}
+
+	// Process the PDF
+	// err = processPDF(tempFile.Name())
+	err = processPDF(tempFile)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error processing PDF: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Send a success response
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("PDF processed successfully, embeddings stored in Chroma DB"))
+}
+
+// Main function to set up the server
+func main() {
+	r := mux.NewRouter()
+	r.HandleFunc("/upload-pdf", uploadPDFHandler).Methods("POST")
+
+	fmt.Println("Server running on port 8080")
+	log.Fatal(http.ListenAndServe(":8080", r))
+}
