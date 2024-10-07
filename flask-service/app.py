@@ -23,7 +23,7 @@ app = Flask(__name__)
 weaviate_client = None
 
 weaviate_host = os.getenv("WEAVIATE_URL", "localhost")
-pg_host = os.getenv("PG_URL", "localhost")
+pg_host = os.getenv("PG_URL", "localhost") # The host of the PostgreSQL server (e.g., "localhost", "postgres", "service_name")
 logging.basicConfig(level=logging.INFO)
 
 try:
