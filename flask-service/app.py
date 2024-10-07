@@ -3,7 +3,7 @@
 import http
 import os
 from weaviate.classes.config import Property, DataType
-from flask import Flask, json, request, jsonify
+from flask import Flask, request, jsonify
 import chromadb
 from chromadb.config import DEFAULT_TENANT, DEFAULT_DATABASE, Settings
 import uuid
@@ -80,6 +80,7 @@ model = AutoModel.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
 # Define a projection matrix to transform the 384-dim embedding to 512-dim
 projection_matrix = np.random.rand(384, 512)
 
+# Create a temporary folder to store uploaded files
 try:
     path = os.path.dirname(os.path.abspath(__file__))
     upload_folder=os.path.join(
@@ -1020,10 +1021,9 @@ def search_query_weviate():
 
 @app.route('/')
 def index():
-    return "Flask DB Service is Running!", 200
+    return "Welcome to the Vector DB Stress Test!", 200
 
 
 if __name__ == '__main__':
-    # Run the Flask app
-    # print('weviate_is_ready:', weaviate_client.is_ready())
+    logging.info("Starting the Vector DB Stress Test service")    
     app.run(host='0.0.0.0', port=5001, debug=True)

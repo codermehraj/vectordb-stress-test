@@ -12,20 +12,6 @@ services:
     networks:
       - mynetwork   
 
-  # postgres:
-  #   image: pgvector/pgvector  # Use the official pgvector image
-  #   ports:
-  #     - "5432:5432"
-  #   volumes:
-  #     - ./data:/var/lib/postgresql/data
-  #     - ./init_pgvector.sql:/docker-entrypoint-initdb.d/init_pgvector.sql
-  #   environment:
-  #     POSTGRES_USER: myuser
-  #     POSTGRES_PASSWORD: mypassword
-  #     POSTGRES_DB: mydb
-  #   networks:
-  #     - mynetwork
-
   postgres:
     build:
       context: ./postgres  # Update this to point to the directory where the Dockerfile is located
@@ -91,3 +77,17 @@ volumes:
 networks:
   mynetwork:
     driver: bridge
+
+  # postgres:
+  #   image: pgvector/pgvector  # Use the official pgvector image
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - ./data:/var/lib/postgresql/data
+  #     - ./init_pgvector.sql:/docker-entrypoint-initdb.d/init_pgvector.sql
+  #   environment:
+  #     POSTGRES_USER: myuser
+  #     POSTGRES_PASSWORD: mypassword
+  #     POSTGRES_DB: mydb
+  #   networks:
+  #     - mynetwork
