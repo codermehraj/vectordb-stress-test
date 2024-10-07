@@ -2,3 +2,6 @@ Flask
 psycopg2
 chromadb
 weaviate-client
+transformers
+torch
+pymupdf
